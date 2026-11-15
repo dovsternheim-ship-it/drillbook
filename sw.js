@@ -1,4 +1,4 @@
-const CACHE = 'drillbook-1794764059';
+const CACHE = 'drillbook-1794765540';
 const FILES = ['./', 'index.html', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png',
   'vendor/pdf.min.js', 'vendor/pdf.worker.min.js', 'vendor/three.min.js', 'vendor/mammoth.browser.min.js'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });

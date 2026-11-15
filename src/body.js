@@ -76,7 +76,152 @@ var Body = (function () {
       for (let k = 0; k < 4; k++) { const w = asset.sw[v * 4 + k] / 255; if (w > 0.02) { bs.push(asset.si[v * 4 + k]); ws.push(w); } }
       list.push({ p: [P[v * 3], P[v * 3 + 1], P[v * 3 + 2]], b: bs, w: ws });
     }
-    samples = list; ready = true;
+    samples = list;
+    buildVolumes(asset);
+    ready = true;
+  }
+
+  // ---- body volumes for collision: each torso/limb bone gets an elliptical capsule fitted to its skin ----
+  let VOL = [];
+  const TORSO = ['hips', 'spine05', 'spine04', 'spine03', 'spine02', 'spine01', 'neck', 'head'];
+  function pct(a, q) { if (!a.length) return 0; const b = Float64Array.from(a).sort(); return b[Math.min(b.length - 1, Math.floor(q * (b.length - 1)))]; }
+  function buildVolumes(asset) {
+    const names = TORSO.slice();
+    for (const s of SIDES) names.push('upperarm.' + s, 'forearm.' + s, 'thigh.' + s, 'shin.' + s);
+    const P = asset.pos, byB = {};
+    names.forEach(n => byB[ix[n]] = []);
+    // limbs: vertices mostly driven by the bone; torso and head: every trunk vertex, split by height (the bind pose stands upright)
+    const limbSet = new Set(); for (const s of SIDES) for (const n of ['upperarm', 'forearm', 'hand', 'thigh', 'shin', 'foot', 'toes', 'clavicle']) limbSet.add(ix[n + '.' + s]);
+    for (const s of SIDES) for (let f = 1; f <= 5; f++) for (let k = 1; k <= 3; k++) limbSet.add(ix['finger' + f + '-' + k + '.' + s]);
+    const tb = TORSO.map(n => ix[n]), crotch = B[ix['thigh.L']].h[1] - 0.08;
+    for (let v = 0; v < asset.n; v++) {
+      let lw = 0, dom = -1, dw = 0;
+      for (let k = 0; k < 4; k++) { const b = asset.si[v * 4 + k], w = asset.sw[v * 4 + k] / 255; if (limbSet.has(b)) lw += w; if (w > dw) { dw = w; dom = b; } }
+      if (lw < 0.35) {
+        const y = P[v * 3 + 1]; if (y < crotch) continue;
+        let bi = tb[tb.length - 1];
+        for (const i of tb) { const b = B[i], lo = i === ix.hips ? crotch : b.h[1], hi = Math.max(b.h[1], b.t[1]); if (y >= lo && y < hi) { bi = i; break; } }
+        byB[bi].push(v);
+      } else for (let k = 0; k < 4; k++) { const b = asset.si[v * 4 + k], w = asset.sw[v * 4 + k] / 255; if (w > 0.55 && byB[b] && limbSet.has(b)) byB[b].push(v); }
+    }
+    VOL = names.map(n => {
+      const i = ix[n], b = B[i], a = sub(b.t, b.h), L2 = dot(a, a), xs = [], zs = [], rs = [], ss = [];
+      for (const v of byB[i]) {
+        const d = sub([P[v * 3], P[v * 3 + 1], P[v * 3 + 2]], b.h), t = Math.max(0, Math.min(1, dot(d, a) / L2));
+        const r = sub(d, mul(a, t)); xs.push(r[0]); zs.push(r[2]); rs.push(len(r)); ss.push(dot(d, a) / L2);
+      }
+      const torso = TORSO.includes(n);
+      if (torso) {
+        const x0 = pct(xs, 0.03), x1 = pct(xs, 0.97), z0 = pct(zs, 0.03), z1 = pct(zs, 0.97);
+        return { i, n, torso, a, L2, c: [(x0 + x1) / 2, 0, (z0 + z1) / 2], rx: (x1 - x0) / 2, rz: (z1 - z0) / 2, s0: Math.min(0, pct(ss, 0.02)), s1: Math.max(1, pct(ss, 0.98)) };
+      }
+      const r = pct(rs, 0.7);
+      return { i, n, torso, a, L2, c: [0, 0, 0], rx: r, rz: r, s0: 0, s1: 1 };
+    });
+    // the pelvis bone is short and its sides belong to the thighs: give it the lower trunk's girth
+    const hv = VOL.find(v => v.n === 'hips'), s5 = VOL.find(v => v.n === 'spine05');
+    hv.rx = Math.max(hv.rx, s5.rx); hv.rz = Math.max(hv.rz, s5.rz); hv.c = [0, 0, s5.c[2]]; hv.s0 = Math.max(hv.s0, -0.3); hv.s1 = Math.min(hv.s1, 1.5);
+  }
+  // how deep world point p (with its own radius pr) sits inside volume V; returns {d: depth (m), n: push direction}
+  function inside(S, V, p, pr) {
+    const v = qv(qi(S.W[V.i]), sub(p, S.X[V.i]));
+    const t = dot(v, V.a) / V.L2, tc = Math.max(V.s0, Math.min(V.s1, t));
+    const r = sub(sub(v, mul(V.a, tc)), V.c);
+    // radial (elliptical) part
+    const rx = V.rx + pr, rz = V.rz + pr;
+    const e = Math.sqrt((r[0] / rx) ** 2 + (r[2] / rz) ** 2 + (V.torso ? 0 : (r[1] / rx) ** 2));
+    const over = (t - tc) * Math.sqrt(V.L2) / rx; // past the end caps
+    const q = Math.sqrt(e * e + over * over);
+    if (q >= 1) return null;
+    // push direction: out radially (and along the axis past the caps), in world space
+    let dirL = q > 1e-4 ? [r[0] / (rx * rx), V.torso ? 0 : r[1] / (rx * rx), r[2] / (rz * rz)] : [V.c[0] >= 0 ? 1 : -1, 0, 0];
+    if (over) dirL = add(dirL, mul(norm(V.a), over / rx));
+    const dl = norm(dirL);
+    const depth = (1 - q) * Math.min(rx, rz);
+    return { d: depth, n: qv(S.W[V.i], dl) };
+  }
+  // a point on the skin of bone n: u degrees around (0 front, 90 left, 180 back), t along the bone (0 head .. 1 tail)
+  function surface(S, n, u, t) {
+    const V = VOL.find(v => v.n === n); if (!V) return null;
+    const a = u * D, ex = Math.sin(a), ez = Math.cos(a);
+    const local = add(add(mul(V.a, t), V.c), [ex * V.rx, 0, ez * V.rz]);
+    const nl = norm([ex / V.rx, 0, ez / V.rz]);
+    return { p: add(S.X[V.i], qv(S.W[V.i], local)), n: qv(S.W[V.i], nl) };
+  }
+  // the deepest penetration of point p into any body volume, skipping volumes listed in skip
+  function probe(S, p, pr, skip) {
+    let best = null;
+    for (const V of VOL) { if (skip && skip.has(V.i)) continue; const h = inside(S, V, p, pr); if (h && (!best || h.d > best.d)) best = h; }
+    return best;
+  }
+  // points along an arm / leg that must stay outside the rest of the body
+  function limbPoints(S, s, arm) {
+    const pts = [];
+    if (arm) {
+      const e = S.X[ix['forearm.' + s]], w = S.X[ix['hand.' + s]], h = tail(S, ix['hand.' + s]);
+      pts.push({ p: e, r: 0.04, k: 'elbow' });
+      for (const t of [0.33, 0.66]) pts.push({ p: add(e, mul(sub(w, e), t)), r: 0.035, k: 'fore', t });
+      pts.push({ p: w, r: 0.03, k: 'wrist' }, { p: h, r: 0.028, k: 'hand' });
+      pts.push({ p: tail(S, ix['finger3-3.' + s]), r: 0.012, k: 'finger' }, { p: tail(S, ix['finger1-3.' + s]), r: 0.012, k: 'finger' });
+    } else {
+      const k = S.X[ix['shin.' + s]], a = S.X[ix['foot.' + s]], t = tail(S, ix['toes.' + s]);
+      pts.push({ p: k, r: 0.05, k: 'knee' }, { p: add(k, mul(sub(a, k), 0.5)), r: 0.045, k: 'shin' }, { p: a, r: 0.045, k: 'ankle' }, { p: t, r: 0.035, k: 'toe' });
+    }
+    return pts;
+  }
+  function skipFor(s, arm) {
+    const o = s === 'L' ? 'R' : 'L', sk = new Set();
+    if (arm) { sk.add(ix['upperarm.' + s]); sk.add(ix['forearm.' + s]); }
+    else { sk.add(ix['thigh.' + s]); sk.add(ix['shin.' + s]); sk.add(ix.hips); }
+    return sk;
+  }
+  // measure: deepest penetration of each limb (used by tests)
+  function penetration(S) {
+    const out = {};
+    for (const s of SIDES) for (const arm of [true, false]) {
+      const sk = skipFor(s, arm); let worst = null;
+      for (const pt of limbPoints(S, s, arm)) { const h = probe(S, pt.p, pt.r, sk); if (h && (!worst || h.d > worst.d)) worst = Object.assign({ k: pt.k }, h); }
+      out[(arm ? 'a' : 'l') + s] = worst;
+    }
+    return out;
+  }
+  // resolve: move a free hand / foot (and the elbow / knee) out of the body, keeping the limb's own IK
+  function resolve(S, lock) {
+    for (const s of SIDES) {
+      if (!(lock && lock['h' + s])) resolveArm(S, s);
+      if (!(lock && lock['f' + s])) resolveLeg(S, s);
+    }
+  }
+  function resolveArm(S, s) {
+    const sk = skipFor(s, true), ua = ix['upperarm.' + s], fi = ix['forearm.' + s], hi = ix['hand.' + s];
+    for (let it = 0; it < 4; it++) {
+      let worst = null;
+      for (const pt of limbPoints(S, s, true)) { const h = probe(S, pt.p, pt.r, sk); if (h && (!worst || h.d > worst.d)) worst = Object.assign({ pt }, h); }
+      if (!worst || worst.d < 0.004) return;
+      const sh = S.X[ua], el = S.X[fi], wr = S.X[hi], handW = S.W[hi];
+      const push = mul(worst.n, worst.d + 0.008);
+      let T = wr, pole = norm(sub(el, add(sh, mul(sub(wr, sh), 0.5))));
+      if (worst.pt.k === 'elbow') pole = norm(add(pole, mul(worst.n, 2)));
+      else if (worst.pt.k === 'fore') { T = add(wr, mul(push, worst.pt.t)); pole = norm(add(pole, mul(worst.n, 1 - worst.pt.t))); }
+      else T = add(wr, push);
+      armIK(S, s, T, pole, handW);
+    }
+  }
+  function resolveLeg(S, s) {
+    const sk = skipFor(s, false), fi = ix['foot.' + s], th = ix['thigh.' + s], sn = ix['shin.' + s];
+    for (let it = 0; it < 3; it++) {
+      let worst = null;
+      for (const pt of limbPoints(S, s, false)) { const h = probe(S, pt.p, pt.r, sk); if (h && (!worst || h.d > worst.d)) worst = Object.assign({ pt }, h); }
+      if (!worst || worst.d < 0.005) return;
+      const hp = S.X[th], kn = S.X[sn], an = S.X[fi], footW = S.W[fi];
+      let pole = norm(sub(kn, add(hp, mul(sub(an, hp), 0.5))));
+      let T = an;
+      if (worst.pt.k === 'knee') pole = norm(add(pole, mul(worst.n, 2)));
+      else T = add(an, mul(worst.n, worst.d + 0.01));
+      legIK(S, s, T, pole);
+      // keep the foot's world orientation
+      S.q[fi] = qm(qi(S.W[sn]), footW); fk(S);
+    }
   }
 
   // ---- pose state ----
@@ -162,6 +307,9 @@ var Body = (function () {
       S.q[ix['finger' + f + '-2.' + s]] = qa(ax, gg * 86 + rest * 8 * k);
       S.q[ix['finger' + f + '-3.' + s]] = qa(ax, gg * 52 + rest * 6 * k);
     }
+    // a flat hand tucks the thumb up into the palm's plane (otherwise it would hang below the palm)
+    const hb = B[ix['hand.' + s]], along = norm(sub(hb.t, hb.h));
+    S.q[ix['finger1-1.' + s]] = qa(along, -36 * (1 - rest));
     S.q[ix['finger1-2.' + s]] = qa(ax, g * 22 + rest * 6);
     S.q[ix['finger1-3.' + s]] = qa(ax, g * 30 + rest * 10);
   }
@@ -220,6 +368,6 @@ var Body = (function () {
     return qm(qa(along, ang), Wf);
   }
 
-  return { handBasis: s => Mb['hand.' + s], init, get ready() { return ready; }, newState, pose, fk, legIK, armIK, tail, com, lowest, skinPoint, ix: () => ix, bones: () => B, SEG,
+  return { surface, _samples: () => samples, penetration, resolve, volumes: () => VOL, handBasis: s => Mb['hand.' + s], init, get ready() { return ready; }, newState, pose, fk, legIK, armIK, tail, com, lowest, skinPoint, ix: () => ix, bones: () => B, SEG,
     v: { add, sub, mul, dot, cross, len, norm, mirV }, q: { qm, qi, qv, qa, Rx, Ry, Rz, basis, slerp, mirQ, I } };
 })();

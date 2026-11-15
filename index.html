@@ -772,7 +772,152 @@ var Body = (function () {
       for (let k = 0; k < 4; k++) { const w = asset.sw[v * 4 + k] / 255; if (w > 0.02) { bs.push(asset.si[v * 4 + k]); ws.push(w); } }
       list.push({ p: [P[v * 3], P[v * 3 + 1], P[v * 3 + 2]], b: bs, w: ws });
     }
-    samples = list; ready = true;
+    samples = list;
+    buildVolumes(asset);
+    ready = true;
+  }
+
+  // ---- body volumes for collision: each torso/limb bone gets an elliptical capsule fitted to its skin ----
+  let VOL = [];
+  const TORSO = ['hips', 'spine05', 'spine04', 'spine03', 'spine02', 'spine01', 'neck', 'head'];
+  function pct(a, q) { if (!a.length) return 0; const b = Float64Array.from(a).sort(); return b[Math.min(b.length - 1, Math.floor(q * (b.length - 1)))]; }
+  function buildVolumes(asset) {
+    const names = TORSO.slice();
+    for (const s of SIDES) names.push('upperarm.' + s, 'forearm.' + s, 'thigh.' + s, 'shin.' + s);
+    const P = asset.pos, byB = {};
+    names.forEach(n => byB[ix[n]] = []);
+    // limbs: vertices mostly driven by the bone; torso and head: every trunk vertex, split by height (the bind pose stands upright)
+    const limbSet = new Set(); for (const s of SIDES) for (const n of ['upperarm', 'forearm', 'hand', 'thigh', 'shin', 'foot', 'toes', 'clavicle']) limbSet.add(ix[n + '.' + s]);
+    for (const s of SIDES) for (let f = 1; f <= 5; f++) for (let k = 1; k <= 3; k++) limbSet.add(ix['finger' + f + '-' + k + '.' + s]);
+    const tb = TORSO.map(n => ix[n]), crotch = B[ix['thigh.L']].h[1] - 0.08;
+    for (let v = 0; v < asset.n; v++) {
+      let lw = 0, dom = -1, dw = 0;
+      for (let k = 0; k < 4; k++) { const b = asset.si[v * 4 + k], w = asset.sw[v * 4 + k] / 255; if (limbSet.has(b)) lw += w; if (w > dw) { dw = w; dom = b; } }
+      if (lw < 0.35) {
+        const y = P[v * 3 + 1]; if (y < crotch) continue;
+        let bi = tb[tb.length - 1];
+        for (const i of tb) { const b = B[i], lo = i === ix.hips ? crotch : b.h[1], hi = Math.max(b.h[1], b.t[1]); if (y >= lo && y < hi) { bi = i; break; } }
+        byB[bi].push(v);
+      } else for (let k = 0; k < 4; k++) { const b = asset.si[v * 4 + k], w = asset.sw[v * 4 + k] / 255; if (w > 0.55 && byB[b] && limbSet.has(b)) byB[b].push(v); }
+    }
+    VOL = names.map(n => {
+      const i = ix[n], b = B[i], a = sub(b.t, b.h), L2 = dot(a, a), xs = [], zs = [], rs = [], ss = [];
+      for (const v of byB[i]) {
+        const d = sub([P[v * 3], P[v * 3 + 1], P[v * 3 + 2]], b.h), t = Math.max(0, Math.min(1, dot(d, a) / L2));
+        const r = sub(d, mul(a, t)); xs.push(r[0]); zs.push(r[2]); rs.push(len(r)); ss.push(dot(d, a) / L2);
+      }
+      const torso = TORSO.includes(n);
+      if (torso) {
+        const x0 = pct(xs, 0.03), x1 = pct(xs, 0.97), z0 = pct(zs, 0.03), z1 = pct(zs, 0.97);
+        return { i, n, torso, a, L2, c: [(x0 + x1) / 2, 0, (z0 + z1) / 2], rx: (x1 - x0) / 2, rz: (z1 - z0) / 2, s0: Math.min(0, pct(ss, 0.02)), s1: Math.max(1, pct(ss, 0.98)) };
+      }
+      const r = pct(rs, 0.7);
+      return { i, n, torso, a, L2, c: [0, 0, 0], rx: r, rz: r, s0: 0, s1: 1 };
+    });
+    // the pelvis bone is short and its sides belong to the thighs: give it the lower trunk's girth
+    const hv = VOL.find(v => v.n === 'hips'), s5 = VOL.find(v => v.n === 'spine05');
+    hv.rx = Math.max(hv.rx, s5.rx); hv.rz = Math.max(hv.rz, s5.rz); hv.c = [0, 0, s5.c[2]]; hv.s0 = Math.max(hv.s0, -0.3); hv.s1 = Math.min(hv.s1, 1.5);
+  }
+  // how deep world point p (with its own radius pr) sits inside volume V; returns {d: depth (m), n: push direction}
+  function inside(S, V, p, pr) {
+    const v = qv(qi(S.W[V.i]), sub(p, S.X[V.i]));
+    const t = dot(v, V.a) / V.L2, tc = Math.max(V.s0, Math.min(V.s1, t));
+    const r = sub(sub(v, mul(V.a, tc)), V.c);
+    // radial (elliptical) part
+    const rx = V.rx + pr, rz = V.rz + pr;
+    const e = Math.sqrt((r[0] / rx) ** 2 + (r[2] / rz) ** 2 + (V.torso ? 0 : (r[1] / rx) ** 2));
+    const over = (t - tc) * Math.sqrt(V.L2) / rx; // past the end caps
+    const q = Math.sqrt(e * e + over * over);
+    if (q >= 1) return null;
+    // push direction: out radially (and along the axis past the caps), in world space
+    let dirL = q > 1e-4 ? [r[0] / (rx * rx), V.torso ? 0 : r[1] / (rx * rx), r[2] / (rz * rz)] : [V.c[0] >= 0 ? 1 : -1, 0, 0];
+    if (over) dirL = add(dirL, mul(norm(V.a), over / rx));
+    const dl = norm(dirL);
+    const depth = (1 - q) * Math.min(rx, rz);
+    return { d: depth, n: qv(S.W[V.i], dl) };
+  }
+  // a point on the skin of bone n: u degrees around (0 front, 90 left, 180 back), t along the bone (0 head .. 1 tail)
+  function surface(S, n, u, t) {
+    const V = VOL.find(v => v.n === n); if (!V) return null;
+    const a = u * D, ex = Math.sin(a), ez = Math.cos(a);
+    const local = add(add(mul(V.a, t), V.c), [ex * V.rx, 0, ez * V.rz]);
+    const nl = norm([ex / V.rx, 0, ez / V.rz]);
+    return { p: add(S.X[V.i], qv(S.W[V.i], local)), n: qv(S.W[V.i], nl) };
+  }
+  // the deepest penetration of point p into any body volume, skipping volumes listed in skip
+  function probe(S, p, pr, skip) {
+    let best = null;
+    for (const V of VOL) { if (skip && skip.has(V.i)) continue; const h = inside(S, V, p, pr); if (h && (!best || h.d > best.d)) best = h; }
+    return best;
+  }
+  // points along an arm / leg that must stay outside the rest of the body
+  function limbPoints(S, s, arm) {
+    const pts = [];
+    if (arm) {
+      const e = S.X[ix['forearm.' + s]], w = S.X[ix['hand.' + s]], h = tail(S, ix['hand.' + s]);
+      pts.push({ p: e, r: 0.04, k: 'elbow' });
+      for (const t of [0.33, 0.66]) pts.push({ p: add(e, mul(sub(w, e), t)), r: 0.035, k: 'fore', t });
+      pts.push({ p: w, r: 0.03, k: 'wrist' }, { p: h, r: 0.028, k: 'hand' });
+      pts.push({ p: tail(S, ix['finger3-3.' + s]), r: 0.012, k: 'finger' }, { p: tail(S, ix['finger1-3.' + s]), r: 0.012, k: 'finger' });
+    } else {
+      const k = S.X[ix['shin.' + s]], a = S.X[ix['foot.' + s]], t = tail(S, ix['toes.' + s]);
+      pts.push({ p: k, r: 0.05, k: 'knee' }, { p: add(k, mul(sub(a, k), 0.5)), r: 0.045, k: 'shin' }, { p: a, r: 0.045, k: 'ankle' }, { p: t, r: 0.035, k: 'toe' });
+    }
+    return pts;
+  }
+  function skipFor(s, arm) {
+    const o = s === 'L' ? 'R' : 'L', sk = new Set();
+    if (arm) { sk.add(ix['upperarm.' + s]); sk.add(ix['forearm.' + s]); }
+    else { sk.add(ix['thigh.' + s]); sk.add(ix['shin.' + s]); sk.add(ix.hips); }
+    return sk;
+  }
+  // measure: deepest penetration of each limb (used by tests)
+  function penetration(S) {
+    const out = {};
+    for (const s of SIDES) for (const arm of [true, false]) {
+      const sk = skipFor(s, arm); let worst = null;
+      for (const pt of limbPoints(S, s, arm)) { const h = probe(S, pt.p, pt.r, sk); if (h && (!worst || h.d > worst.d)) worst = Object.assign({ k: pt.k }, h); }
+      out[(arm ? 'a' : 'l') + s] = worst;
+    }
+    return out;
+  }
+  // resolve: move a free hand / foot (and the elbow / knee) out of the body, keeping the limb's own IK
+  function resolve(S, lock) {
+    for (const s of SIDES) {
+      if (!(lock && lock['h' + s])) resolveArm(S, s);
+      if (!(lock && lock['f' + s])) resolveLeg(S, s);
+    }
+  }
+  function resolveArm(S, s) {
+    const sk = skipFor(s, true), ua = ix['upperarm.' + s], fi = ix['forearm.' + s], hi = ix['hand.' + s];
+    for (let it = 0; it < 4; it++) {
+      let worst = null;
+      for (const pt of limbPoints(S, s, true)) { const h = probe(S, pt.p, pt.r, sk); if (h && (!worst || h.d > worst.d)) worst = Object.assign({ pt }, h); }
+      if (!worst || worst.d < 0.004) return;
+      const sh = S.X[ua], el = S.X[fi], wr = S.X[hi], handW = S.W[hi];
+      const push = mul(worst.n, worst.d + 0.008);
+      let T = wr, pole = norm(sub(el, add(sh, mul(sub(wr, sh), 0.5))));
+      if (worst.pt.k === 'elbow') pole = norm(add(pole, mul(worst.n, 2)));
+      else if (worst.pt.k === 'fore') { T = add(wr, mul(push, worst.pt.t)); pole = norm(add(pole, mul(worst.n, 1 - worst.pt.t))); }
+      else T = add(wr, push);
+      armIK(S, s, T, pole, handW);
+    }
+  }
+  function resolveLeg(S, s) {
+    const sk = skipFor(s, false), fi = ix['foot.' + s], th = ix['thigh.' + s], sn = ix['shin.' + s];
+    for (let it = 0; it < 3; it++) {
+      let worst = null;
+      for (const pt of limbPoints(S, s, false)) { const h = probe(S, pt.p, pt.r, sk); if (h && (!worst || h.d > worst.d)) worst = Object.assign({ pt }, h); }
+      if (!worst || worst.d < 0.005) return;
+      const hp = S.X[th], kn = S.X[sn], an = S.X[fi], footW = S.W[fi];
+      let pole = norm(sub(kn, add(hp, mul(sub(an, hp), 0.5))));
+      let T = an;
+      if (worst.pt.k === 'knee') pole = norm(add(pole, mul(worst.n, 2)));
+      else T = add(an, mul(worst.n, worst.d + 0.01));
+      legIK(S, s, T, pole);
+      // keep the foot's world orientation
+      S.q[fi] = qm(qi(S.W[sn]), footW); fk(S);
+    }
   }
 
   // ---- pose state ----
@@ -858,6 +1003,9 @@ var Body = (function () {
       S.q[ix['finger' + f + '-2.' + s]] = qa(ax, gg * 86 + rest * 8 * k);
       S.q[ix['finger' + f + '-3.' + s]] = qa(ax, gg * 52 + rest * 6 * k);
     }
+    // a flat hand tucks the thumb up into the palm's plane (otherwise it would hang below the palm)
+    const hb = B[ix['hand.' + s]], along = norm(sub(hb.t, hb.h));
+    S.q[ix['finger1-1.' + s]] = qa(along, -36 * (1 - rest));
     S.q[ix['finger1-2.' + s]] = qa(ax, g * 22 + rest * 6);
     S.q[ix['finger1-3.' + s]] = qa(ax, g * 30 + rest * 10);
   }
@@ -916,7 +1064,7 @@ var Body = (function () {
     return qm(qa(along, ang), Wf);
   }
 
-  return { handBasis: s => Mb['hand.' + s], init, get ready() { return ready; }, newState, pose, fk, legIK, armIK, tail, com, lowest, skinPoint, ix: () => ix, bones: () => B, SEG,
+  return { surface, _samples: () => samples, penetration, resolve, volumes: () => VOL, handBasis: s => Mb['hand.' + s], init, get ready() { return ready; }, newState, pose, fk, legIK, armIK, tail, com, lowest, skinPoint, ix: () => ix, bones: () => B, SEG,
     v: { add, sub, mul, dot, cross, len, norm, mirV }, q: { qm, qi, qv, qa, Rx, Ry, Rz, basis, slerp, mirQ, I } };
 })();
 
@@ -929,7 +1077,7 @@ var Body = (function () {
 // Keys: {p: pose, t: seconds to arrive, h: seconds to hold, air: jump arc on the way in}
 var Moves = (function () {
   const { add, sub, mul, dot, len, norm, mirV } = Body.v;
-  const { qm, qi, qv, Ry, basis, slerp, mirQ } = Body.q;
+  const { qm, qi, qv, qa, Ry, basis, slerp, mirQ } = Body.q;
   const clone = o => JSON.parse(JSON.stringify(o));
   function merge(a, b) {
     const r = clone(a || {});
@@ -960,8 +1108,8 @@ var Moves = (function () {
   const SUP = P({ root: [0, 0.12, 0], ori: [0, -90, 0], hd: [6, 0, 0], aL: { e: 8, p: 60, el: 8, g: 0.2 }, aR: { e: 8, p: 60, el: 8, g: 0.2 }, lL: { f: 48, a: 5, k: 100, an: 0, r: 0 }, lR: { f: 48, a: 5, k: 100, an: 0, r: 0 } });
   const SUPFLAT = P({ root: [0, 0.12, 0], ori: [0, -90, 0], hd: [4, 0, 0], aL: { e: 10, p: 60, el: 6, g: 0.2 }, aR: { e: 10, p: 60, el: 6, g: 0.2 }, lL: { f: 0, a: 4, k: 4, an: -30, r: 10 }, lR: { f: 0, a: 4, k: 4, an: -30, r: 10 } });
   // hands and knees (thighs and arms vertical, tops of the feet on the floor)
-  const QUAD = P({ root: [0, 0.6, 0], ori: [0, 84, 0], sp: [0, 0, 0], nk: [-10, 0, 0], hd: [-10, 0, 0],
-    aL: { e: 84, p: 6, el: 0, g: 0 }, aR: { e: 84, p: 6, el: 0, g: 0 }, lL: { f: 84, a: 4, k: 90, an: -82, r: 0 }, lR: { f: 84, a: 4, k: 90, an: -82, r: 0 } });
+  const QUAD = P({ root: [0, 0.6, 0], ori: [0, 78, 0], sp: [0, 0, 0], nk: [-12, 0, 0], hd: [-10, 0, 0],
+    aL: { e: 78, p: 6, el: 0, g: 0 }, aR: { e: 78, p: 6, el: 0, g: 0 }, lL: { f: 78, a: 4, k: 90, an: -82, r: 0 }, lR: { f: 78, a: 4, k: 90, an: -82, r: 0 } });
   // face down plank line on straight arms (feet on toes)
   const PLANK = P({ root: [0, 0.7, 0], ori: [0, 76, 0], nk: [-10, 0, 0], hd: [-6, 0, 0], aL: { e: 76, p: 10, el: 0, g: 0 }, aR: { e: 76, p: 10, el: 0, g: 0 }, lL: { f: 0, a: 2, k: 0, an: -20, toe: 55 }, lR: { f: 0, a: 2, k: 0, an: -20, toe: 55 }, cw: { hL: 1, hR: 1 } });
 
@@ -1028,6 +1176,7 @@ var Moves = (function () {
       if (v && typeof v === 'object') {
         if (v.under) v.under = v.under.replace(/\.L$/, '.#').replace(/\.R$/, '.L').replace(/\.#$/, '.R');
         if (v.to) v.to = v.to.replace(/\.L$/, '.#').replace(/\.R$/, '.L').replace(/\.#$/, '.R');
+        if (v.on) { v.on = v.on.replace(/\.L$/, '.#').replace(/\.R$/, '.L').replace(/\.#$/, '.R'); if (v.u) v.u = -v.u; }
         for (const k of ['at', 'palm', 'fing']) if (v[k]) v[k] = mirV(v[k]);
         if (v.pole) v.pole = mirV(v.pole);
         if (v.pos) v.pos = mirV(v.pos);
@@ -1060,10 +1209,21 @@ var Moves = (function () {
     const yaw = Math.atan2(head[0], head[2]) * 180 / Math.PI;
     S.q[ti] = qm(qi(S.W[ix['foot.' + s]]), Ry(yaw)); Body.fk(S);
   }
+  const hs = {};
+  function handSamples(s) {
+    if (hs[s]) return hs[s]; const ix = IX(), set = new Set([ix['hand.' + s]]);
+    for (let f = 1; f <= 5; f++) for (let k = 1; k <= 3; k++) set.add(ix['finger' + f + '-' + k + '.' + s]);
+    return (hs[s] = Body._samples().filter(sp => set.has(sp.b[0])));
+  }
+  const fos = {};
+  function foreSamples(s) {
+    if (fos[s]) return fos[s]; const ix = IX();
+    return (fos[s] = handSamples(s).concat(Body._samples().filter(sp => sp.b[0] === ix['forearm.' + s])));
+  }
   function handFlat(S, s, head, rot) { // palm down, fingers along heading turned by rot degrees (outward)
     const ix = IX(), hi = ix['hand.' + s];
     const yaw = Math.atan2(head[0], head[2]) + (s === 'L' ? 1 : -1) * (rot || 0) * Math.PI / 180;
-    const f = [Math.sin(yaw), -0.08, Math.cos(yaw)];
+    const f = [Math.sin(yaw), 0.12, Math.cos(yaw)];
     const Mh = Body.handBasis(s);
     const C = basis(f, s === 'L' ? [0, 1, 0] : [0, -1, 0]);
     return qm(C, qi(Mh));
@@ -1083,7 +1243,88 @@ var Moves = (function () {
     if (!n) return;
     a = mul(a, 1 / n); S.root = add(S.root, a); Body.fk(S);
   }
+  // ---- resting on the floor: the listed body regions touch the ground, nothing sinks below it ----
+  const REG = { head: ['head', 'neck'], upback: ['spine01', 'spine02'], lowback: ['spine03', 'spine04', 'spine05'], pelvis: ['hips'],
+    thighL: ['thigh.L'], thighR: ['thigh.R'], kneeL: ['shin.L'], kneeR: ['shin.R'], shinL: ['shin.L'], shinR: ['shin.R'], footL: ['foot.L', 'toes.L'], footR: ['foot.R', 'toes.R'],
+    handL: ['hand.L'], handR: ['hand.R'], foreL: ['forearm.L'], foreR: ['forearm.R'], armL: ['upperarm.L'], armR: ['upperarm.R'] };
+  let regSets = null;
+  function regionOf() {
+    if (regSets) return regSets; const ix = IX(); regSets = {};
+    for (const k in REG) regSets[k] = new Set(REG[k].map(n => ix[n]));
+    // knees: the skin around the knee joint (the kneecap belongs partly to the thigh)
+    const bones = Body.bones();
+    for (const s of ['L', 'R']) {
+      const kj = bones[ix['shin.' + s]].h, set = new Set([ix['thigh.' + s], ix['shin.' + s]]);
+      regSets['knee' + s] = { has: () => false, list: Body._samples().filter(sp => set.has(sp.b[0]) && Math.hypot(sp.p[0] - kj[0], sp.p[1] - kj[1], sp.p[2] - kj[2]) < 0.09) };
+      // sit bones: the buttock skin under the hip joint (belongs to the hips and the top of the thigh)
+      const hj = bones[ix['thigh.' + s]].h, seat = new Set([ix['hips'], ix['thigh.' + s]]);
+      regSets['seat' + s] = { has: () => false, list: Body._samples().filter(sp => seat.has(sp.b[0]) && sp.p[2] < hj[2] - 0.02 && Math.abs(sp.p[0] - hj[0]) < 0.07 && Math.abs(sp.p[1] - hj[1]) < 0.13) };
+    }
+    return regSets;
+  }
+  const regList = new Map();
+  function lowestIn(S, set) {
+    let list = set.list || regList.get(set);
+    if (!list) { list = Body._samples().filter(sp => set.has(sp.b[0])); regList.set(set, list); }
+    let best = null;
+    for (const sp of list) { const p = Body.skinPoint(S, sp); if (!best || p[1] < best[1]) best = p; }
+    return best;
+  }
+  // after settling, bend one joint parameter until a region just touches the floor (e.g. the forehead in child's pose)
+  function reach(S, m, P) {
+    const rs = regionOf();
+    for (const r of [].concat(m.reach)) {
+      const set = rs[r.region], path = r.param; // param: ['sp', 0]
+      const keys = [].concat(path[0]); // param: ['sp', 0] or [['lL', 'lR'], 'f'] for both legs together
+      const get = () => P[keys[0]][path[1]], put = v => { for (const k of keys) { P[k] = P[k].slice ? P[k].slice() : Object.assign({}, P[k]); P[k][path[1]] = v; } };
+      const v0 = get();
+      for (let it = 0; it < 4; it++) {
+        const h0 = lowestIn(S, set)[1] - (r.y || 0); if (Math.abs(h0) < 0.004) break;
+        const v = get(); put(v + 4); Body.pose(S, P); settle(S, m); const h1 = lowestIn(S, set)[1] - (r.y || 0);
+        const g = (h1 - h0) / 4; let nv = Math.abs(g) > 1e-5 ? v - h0 / g : v;
+        nv = Math.max(v0 - (r.max || 25), Math.min(v0 + (r.max || 25), nv));
+        put(nv); Body.pose(S, P); settle(S, m);
+      }
+    }
+  }
+  function rotAbout(S, c, R) { // rigid rotation of the whole body about world point c
+    const ix = IX(); S.root = add(c, qv(R, sub(S.root, c))); S.q[ix.hips] = qm(R, S.q[ix.hips]); Body.fk(S);
+  }
+  function settle(S, m) {
+    const rs = regionOf(); let sup = m.supports;
+    for (let it = 0; it < 5; it++) {
+      if (it === 0 && sup.length > 1) { // a limb lifted by the exercise (bird-dog leg, fire hydrant) is not a support
+        const hs = sup.map(k => [k, lowestIn(S, rs[k])[1]]), mn = Math.min(...hs.map(h => h[1]));
+        const keep = hs.filter(h => h[1] - mn < 0.06).map(h => h[0]); if (keep.length) sup = keep;
+      }
+      const pts = sup.map(k => lowestIn(S, rs[k])).filter(Boolean);
+      if (!pts.length) break;
+      // fit y = a + b x + c z through the support points (lightly regularised), then level that plane onto the floor
+      let n = pts.length, sx = 0, sz = 0, sy = 0; for (const p of pts) { sx += p[0]; sy += p[1]; sz += p[2]; }
+      const cx = sx / n, cy = sy / n, cz = sz / n;
+      let xx = 1e-3, zz = 1e-3, xz = 0, xy = 0, zy = 0;
+      for (const p of pts) { const dx = p[0] - cx, dz = p[2] - cz, dy = p[1] - cy; xx += dx * dx; zz += dz * dz; xz += dx * dz; xy += dx * dy; zy += dz * dy; }
+      const det = xx * zz - xz * xz, b = (xy * zz - zy * xz) / det, c = (zy * xx - xy * xz) / det;
+      const nrm = norm([-b, 1, -c]), ax = [-nrm[2], 0, nrm[0]], ang = Math.asin(Math.min(1, len(ax)));
+      if (ang > 1e-4) rotAbout(S, [cx, cy, cz], qa(norm(ax), ang * 180 / Math.PI));
+      const pts2 = sup.map(k => lowestIn(S, rs[k])).filter(Boolean);
+      const my = Math.min(pts2.reduce((a, p) => a + p[1], 0) / pts2.length, Math.min(...pts2.map(p => p[1])) + 0.01);
+      S.root = add(S.root, [0, -my, 0]); Body.fk(S);
+    }
+    // nothing may go below the floor (limbs placed by contacts are solved afterwards and are left out here)
+    const ix = IX(), held = new Set();
+    for (const c in m.contacts || {}) {
+      const s = c.slice(-1);
+      const names = c[0] === 'h' ? ['upperarm', 'forearm', 'hand'] : ['thigh', 'shin', 'foot', 'toes'];
+      names.forEach(n => held.add(ix[n + '.' + s]));
+      if (c[0] === 'h') for (let f = 1; f <= 5; f++) for (let k = 1; k <= 3; k++) held.add(ix['finger' + f + '-' + k + '.' + s]);
+    }
+    const sk = skipFn(m);
+    const low = Body.lowest(S, sp => held.has(sp.b[0]) || (sk && sk(sp)));
+    if (low < 0) { S.root = add(S.root, [0, -low, 0]); Body.fk(S); }
+  }
   function anchorGround(S, m) {
+    if (m.supports) return settle(S, m);
     const an = m.anchor;
     let y0 = 0, skip = skipFn(m);
     if (typeof an === 'object' && an.bones) { const ix = IX(); const set = new Set(an.bones.map(b => ix[b])); skip = sp => !set.has(sp.b[0]); y0 = an.y || 0; }
@@ -1093,7 +1334,7 @@ var Moves = (function () {
   // evaluate a pose with anchoring but no contacts (used for reference positions)
   function base(S, m, P) {
     Body.pose(S, P);
-    if (m.anchor === 'ground' || (m.anchor && m.anchor.bones)) anchorGround(S, m);
+    if (m.anchor === 'ground' || (m.anchor && m.anchor.bones)) { anchorGround(S, m); if (m.reach) reach(S, m, clone(P)); }
   }
   function refsFor(pr, side) {
     if (pr.refs[side]) return pr.refs[side];
@@ -1143,7 +1384,7 @@ var Moves = (function () {
         P.ori[1] -= Math.atan2(err, hgt) * 180 / Math.PI;
         Body.pose(S, P); anchorFeet(S, m, ref, P.cw);
       }
-    } else if (m.anchor === 'ground' || (m.anchor && m.anchor.bones)) anchorGround(S, m);
+    } else if (m.anchor === 'ground' || (m.anchor && m.anchor.bones)) { anchorGround(S, m); if (m.reach) reach(S, m, P); }
     if (P.lift) { S.root = add(S.root, [0, P.lift, 0]); Body.fk(S); }
     if (ref.pin) { const ps = ref.pinB.map(b => S.X[ix[b]]); const c = mul(ps.reduce((a, b) => add(a, b), [0, 0, 0]), 1 / ps.length); S.root = add(S.root, [ref.pin[0] - c[0], 0, ref.pin[2] - c[2]]); Body.fk(S); }
     // contacts
@@ -1166,17 +1407,40 @@ var Moves = (function () {
       } else {
         let T = null, Wh = null, pole = v && v.pole ? rotY(v.pole, hd) : rotY(s === 'L' ? [0.5, -0.1, -1] : [-0.5, -0.1, -1], hd);
         if (ctype(v) === 'palm') { Wh = handFlat(S, s, hd, v && v.rot != null ? v.rot : 12); T = ref[c]; }
+        else if (v && v.on) {
+          // the palm rests flat on the skin: palm faces the body, fingers run along the given direction
+          const on = v.on;
+          const sf = Body.surface(S, on, v.u || 0, v.t == null ? 0.5 : v.t);
+          if (sf) {
+            const bi = ix[on]; let f = qv(S.W[bi], v.fing || [0, 1, 0]);
+            f = norm(sub(f, mul(sf.n, dot(f, sf.n))));
+            const palmC = add(sf.p, mul(sf.n, v.lift == null ? 0.016 : v.lift));
+            T = add(palmC, mul(f, -0.075));
+            Wh = qm(basis(f, s === 'L' ? sf.n : mul(sf.n, -1)), qi(Body.handBasis(s)));
+          }
+        }
         else if (v && v.to) {
           const b = ix[v.to]; T = add(S.X[b], qv(S.W[b], v.at || [0, 0, 0]));
           if (v.palm) { const d = qv(S.W[b], v.palm), f = qv(S.W[b], v.fing || [0, 1, 0]); Wh = qm(basis(f, s === 'L' ? mul(d, -1) : d), qi(Body.handBasis(s))); }
         }
         if (T) Body.armIK(S, s, T, pole, Wh);
+        if (T && ctype(v) === 'palm') { // the palm and fingers lie on the surface, not in it
+          const y0 = (v && v.y) || 0; let lo = 1e9;
+          for (const sp of handSamples(s)) { const y = Body.skinPoint(S, sp)[1]; if (y < lo) lo = y; }
+          if (lo < y0 + 0.002) Body.armIK(S, s, add(T, [0, y0 + 0.002 - lo, 0]), pole, Wh);
+        }
       }
       if (w < 0.999) {
         const ids = c[0] === 'h' ? armBones(s) : legBones(s);
         ids.forEach((i, k) => { S.q[i] = slerp(before[k], S.q[i], w); });
         Body.fk(S);
       }
+    }
+    // limbs never pass through the body: free hands, arms, feet and knees are pushed back outside it
+    if (!m.noCollide) {
+      const lock = {};
+      for (const c in m.contacts || {}) { const v = m.contacts[c], t = ctype(v), w = cw[c] == null ? 1 : cw[c]; if (w > 0.5 && (t === 'palm' || t === 'flat' || t === 'ball' || (v && v.on))) lock[c] = 1; }
+      Body.resolve(S, lock);
     }
     // free feet never sink into the floor: lift the leg just enough (keeps the knee direction)
     if (!P.lift) for (const s of ['L', 'R']) {
@@ -1185,6 +1449,17 @@ var Moves = (function () {
       const toe = Body.tail(S, ix['toes.' + s]), ft = S.X[ix['foot.' + s]];
       const low = Math.min(toe[1] - Body.SEG.toe, ft[1] - Body.SEG.ankle);
       if (low < 0) { Body.legIK(S, s, add(ft, [0, -low, 0]), kneePole(S, s, P)); }
+    }
+    // hands and forearms never sink into the floor either: raise the wrist, keep the hand's angle and the elbow direction
+    if (!P.lift) for (const s of ['L', 'R']) {
+      const fs = foreSamples(s);
+      for (let it = 0; it < 2; it++) {
+        let lo = 1e9; for (const sp of fs) { const y = Body.skinPoint(S, sp)[1]; if (y < lo) lo = y; }
+        if (lo > -0.004) break;
+        const ua = S.X[ix['upperarm.' + s]], el = S.X[ix['forearm.' + s]], wr = S.X[ix['hand.' + s]];
+        const mid = mul(add(ua, wr), 0.5), pole = len(sub(el, mid)) > 0.01 ? norm(sub(el, mid)) : [0, 1, 0];
+        Body.armIK(S, s, add(wr, [0, 0.002 - lo, 0]), pole, S.W[ix['hand.' + s]].slice());
+      }
     }
     S.P = P;
     return S;
@@ -1340,8 +1615,17 @@ var Moves = (function () {
     { p: P(M({ ori: [0, 30, 0], root: [0.32, 0.8, 0] }, { lL: { f: 50, k: 60, a: 4 }, lR: { f: 10, a: -20, k: 30, an: -20 }, aL: { e: 30, p: -40, el: 20 }, aR: { e: 50, p: 50, el: 20 } })), t: 0.55, air: 0.5 },
     { p: P(M({ ori: [0, 30, 0], root: [-0.32, 0.8, 0] }, { lR: { f: 50, k: 60, a: 4 }, lL: { f: 10, a: -20, k: 30, an: -20 }, aR: { e: 30, p: -40, el: 20 }, aL: { e: 50, p: 50, el: 20 } })), t: 0.55, air: 0.5 }] });
 
+  // child's pose: from hands and knees, knees wide, sit the hips back onto the heels, chest down between the thighs,
+  // forehead on the floor, arms long in front with the palms down
+  const CHILD = P({ root: [0, 0.3, 0], ori: [0, 58, 0], sp: [40, 0, 0], nk: [12, 0, 0], hd: [8, 0, 0],
+    ...both({ e: 172, p: 14, el: 4, g: 0 }), ...legs(Object.assign(LW(58, 74, -90, -92), { a: 20, r: -14 })) });
+  def('childpose', { label: "Child's pose", view: { yaw: 66, pitch: 18 }, anchor: 'ground', hold: true, breath: true, groundSkip: 'arms', props: [{ k: 'mat' }],
+    supports: ['shinL', 'shinR', 'footL', 'footR'], reach: { region: 'head', param: ['sp', 0], max: 30 },
+    contacts: { hL: { type: 'palm', rot: 6 }, hR: { type: 'palm', rot: 6 } },
+    keys: [{ p: CHILD, t: 4, h: 0 }, { p: M(CHILD, { sp: [44, 0, 0] }), t: 4, h: 0 }] });
+
   // ======================= FLOOR: hands and knees =======================
-  const floor = (name, o) => def(name, Object.assign({ view: FLOOR, anchor: 'ground', groundSkip: 'arms', props: [{ k: 'mat' }] }, o));
+  const floor = (name, o) => def(name, Object.assign({ view: FLOOR, anchor: 'ground', groundSkip: 'arms', props: [{ k: 'mat' }], supports: ['kneeL', 'kneeR'] }, o));
   // bird-dog: opposite arm and leg long, hold 2 s, hips square
   const BD_A = M(QUAD, { aL: { e: 174, p: 4, el: 2, g: 0.1, wf: -10 }, lR: { f: -6, a: 2, k: 2, an: -40 }, cw: { hL: 0, hR: 1 } });
   const BD_B = M(QUAD, { aR: { e: 174, p: 4, el: 2, g: 0.1, wf: -10 }, lL: { f: -6, a: 2, k: 2, an: -40 }, cw: { hL: 1, hR: 0 } });
@@ -1354,7 +1638,7 @@ var Moves = (function () {
     { p: QUAD, t: 1.3, h: 0.2 }, { p: M(QUAD, { lL: { f: -2, k: 90, an: 10 } }), t: 1.1, h: 0.6 }] });
 
   // ======================= FLOOR: on the back =======================
-  const sup = (name, o) => floor(name, Object.assign({ view: { yaw: 66, pitch: 20 }, groundSkip: null, pin: 'spine02' }, o));
+  const sup = (name, o) => floor(name, Object.assign({ view: { yaw: 66, pitch: 20 }, groundSkip: null, pin: 'spine02', supports: ['upback', 'pelvis', 'head'] }, o));
   // dead bug: arms to the ceiling, knees over hips at 90 degrees; lower one arm overhead and the opposite leg long
   const DB0 = M(SUP, { sp: [4, 0, 0], hd: [6, 0, 0], ...both({ e: 92, p: 6, el: 2, g: 0.1 }), ...legs({ f: 90, k: 90, an: 0, a: 4, r: 0 }) });
   sup('deadbug', { label: 'Dead bug', alt: true, keys: [
@@ -1364,13 +1648,14 @@ var Moves = (function () {
     { p: M(DB0, { aL: { e: 172, p: 8, el: 4 }, lR: { f: 14, k: 2, an: -10 } }), t: 2.2, h: 0.4 }] });
   // glute bridge: feet flat hip-width, lift until knees, hips and shoulders line up, hold 2 s, lower slowly
   const BR0 = M(SUP, { ...legs({ f: 58, k: 112, a: 4, r: 0 }), ...both({ e: 10, p: 40, el: 4, g: 0.1, pr: -60 }) });
-  sup('bridge', { label: 'Glute bridge', contacts: FEET, keys: [
+  const BR_HANDS = { hL: { type: 'palm', rot: -90, under: 'thigh.#', fwd: -0.05, out: 0.14 }, hR: { type: 'palm', rot: -90, under: 'thigh.#', fwd: -0.05, out: 0.14 } };
+  sup('bridge', { label: 'Glute bridge', contacts: Object.assign({}, FEET, BR_HANDS), keys: [
     { p: BR0, t: 3, h: 0.4 },
     { p: M(BR0, { root: [0, 0.4, 0.2], ori: [0, -122, 0], sp: [-2, 0, 0], hd: [24, 0, 0], ...both({ e: -28, p: 34 }) }), t: 1.4, h: 2 }], anchorY: 'shoulders' });
-  sup('singlelegbridge', { label: 'Single-leg bridge', perSide: true, contacts: { fR: 'flat' }, keys: [
+  sup('singlelegbridge', { label: 'Single-leg bridge', perSide: true, contacts: Object.assign({ fR: 'flat' }, BR_HANDS), keys: [
     { p: M(BR0, { lL: { f: 90, k: 20, an: 0 } }), t: 2.5, h: 0.3 },
     { p: M(BR0, { root: [0, 0.4, 0.2], ori: [0, -120, 0], hd: [24, 0, 0], lL: { f: 30, k: 4, an: -10 }, ...both({ e: -28, p: 34 }) }), t: 1.3, h: 1 }] });
-  const BELLY = { hL: { to: 'spine03', at: [0.07, 0.02, 0.13], palm: [0, 0, 1] }, hR: { to: 'spine01', at: [-0.06, 0.06, 0.14], palm: [0, 0, 1] } };
+  const BELLY = { hL: { on: 'spine04', u: 8, t: 0.6, fing: [-1, 0.25, 0] }, hR: { on: 'spine01', u: -12, t: 0.2, fing: [1, 0.3, 0] } };
   // breathing: in for 4 s (belly rises), out for 6 s
   sup('breathe', { label: 'Belly breathing', hold: true, breath: true, contacts: Object.assign({}, FEET, BELLY), keys: [
     { p: M(SUP, { sp: [-4, 0, 0], ori: [0, -92, 0] }), t: 4, ease: 'sine' }, { p: M(SUP, { sp: [1, 0, 0] }), t: 6, ease: 'sine' }] });
@@ -1397,7 +1682,7 @@ var Moves = (function () {
     { p: M(SUPFLAT, M({ sp: [17, 0, 0], hd: [16, 0, 0], ...legs({ f: 29, k: 2, an: -20, a: 2 }) }, both({ e: 170, p: 6, el: 4 }))), t: 3 }] });
   // knees to chest: hug both shins, hold, then rock gently side to side
   const KTC = M(SUP, { hd: [10, 0, 0], sp: [6, 0, 0], ...legs({ f: 122, k: 128, a: 8, an: -10 }) });
-  const HUG = { hL: { to: 'shin.L', at: [0.02, -0.09, 0.06], pole: [1, 0.3, 0] }, hR: { to: 'shin.R', at: [-0.02, -0.09, 0.06], pole: [-1, 0.3, 0] } };
+  const HUG = { hL: { on: 'shin.L', u: 20, t: 0.2, fing: [-1, 0, 0] }, hR: { on: 'shin.R', u: -20, t: 0.2, fing: [1, 0, 0] } };
   sup('kneestochest', { label: 'Knees to chest', hold: true, breath: true, contacts: HUG, keys: [
     { p: KTC, t: 2, h: 3 }, { p: M(KTC, { ori: [0, -90, 0, 18], sp: [6, 0, -12] }), t: 1.4 }, { p: KTC, t: 1.2 },
     { p: M(KTC, { ori: [0, -90, 0, -18], sp: [6, 0, 12] }), t: 1.4 }, { p: KTC, t: 1.2 }] });
@@ -1423,9 +1708,9 @@ var Moves = (function () {
   const puTop = M(PLANK, { root: [0, 0.62, 0], ori: [0, 74.5, 0], ...both({ e: 75, p: 14, el: 0, g: 0 }), ...legs({ f: 0, k: 0, an: -18, toe: 50, a: 3 }) });
   const puBot = M(PLANK, { root: [0, 0.25, 0.3], ori: [0, 87.5, 0], ...both({ e: 30, p: 30, el: 100, g: 0 }), ...legs({ f: 0, k: 0, an: -4, toe: 60, a: 3 }) });
   def('pushup', { label: 'Push-up', view: { yaw: 66, pitch: 14 }, anchor: 'feet', balance: false, contacts: PU, props: [{ k: 'mat' }], keys: [{ p: puTop, t: 1.2, h: 0.4 }, { p: puBot, t: 2.6, h: 0.15 }] });
-  const kpTop = M(puTop, { root: [0, 0.6, -0.1], ori: [0, 64, 0], ...legs({ f: 0, k: 95, an: -30, toe: 0 }) });
-  const kpBot = M(puBot, { root: [0, 0.24, 0.22], ori: [0, 80, 0], ...legs({ f: 0, k: 85, an: -30, toe: 0 }) });
-  def('kneepushup', { label: 'Knee push-up', view: { yaw: 66, pitch: 14 }, anchor: 'ground', groundSkip: 'arms', pin: ['shin.L', 'shin.R'], contacts: { hL: PU.hL, hR: PU.hR }, props: [{ k: 'mat' }], keys: [{ p: kpTop, t: 1.2, h: 0.4 }, { p: kpBot, t: 2.4, h: 0.15 }] });
+  const kpTop = M(puTop, { root: [0, 0.6, -0.1], ori: [0, 64, 0], ...legs({ f: 0, k: 70, an: -30, toe: 0 }) });
+  const kpBot = M(puBot, { root: [0, 0.24, 0.22], ori: [0, 80, 0], ...legs({ f: 0, k: 70, an: -30, toe: 0 }) });
+  def('kneepushup', { supports: ['kneeL', 'kneeR'], label: 'Knee push-up', view: { yaw: 66, pitch: 14 }, anchor: 'ground', groundSkip: 'arms', pin: ['shin.L', 'shin.R'], contacts: { hL: PU.hL, hR: PU.hR }, props: [{ k: 'mat' }], keys: [{ p: kpTop, t: 1.2, h: 0.4 }, { p: kpBot, t: 2.4, h: 0.15 }] });
   def('inclinepushup', { label: 'Incline push-up', view: { yaw: 66, pitch: 12 }, anchor: 'none', props: [{ k: 'bench', pos: [0, 0, 0.55], yaw: 90 }], contacts: { hL: Object.assign({}, PU.hL, { y: 0.455, pos: [0.21, 0, 0.5] }), hR: Object.assign({}, PU.hR, { y: 0.455, pos: [-0.21, 0, 0.5] }), fL: 'ball', fR: 'ball' }, keys: [
     { p: M(PLANK, { root: [0, 0.82, -0.35], ori: [0, 52, 0], ...both({ e: 56, p: 14, el: 0 }), ...legs({ f: 0, k: 0, an: -30, toe: 45, a: 3 }) }), t: 1.2, h: 0.4 },
     { p: M(PLANK, { root: [0, 0.6, -0.12], ori: [0, 64, 0], ...both({ e: 20, p: 30, el: 100 }), ...legs({ f: 0, k: 0, an: -20, toe: 50, a: 3 }) }), t: 2.4, h: 0.2 }] });
@@ -1449,42 +1734,42 @@ var Moves = (function () {
     { p: P(M(legs({ an: -30, k: 2 }), M(both({ e: 165, p: 20, el: 6 }), { cw: { hL: 0, hR: 0 } }))), t: 0.6, air: 0.7 }] });
   // cobra: hips stay down, press the chest up with the back muscles first
   const PRONE = M(STAND, { root: [0, 0.12, 0], ori: [0, 90, 0], nk: [-6, 0, 0], hd: [-6, 0, 0], ...legs({ f: 0, k: 2, an: -80, a: 4 }) });
-  def('cobra', { label: 'Cobra', view: { yaw: 70, pitch: 14 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', contacts: { hL: { type: 'palm', rot: 8, pole: [0.3, 0.1, -1] }, hR: { type: 'palm', rot: 8, pole: [-0.3, 0.1, -1] } }, props: [{ k: 'mat' }], keys: [
+  def('cobra', { supports: ['pelvis', 'kneeL', 'kneeR'], label: 'Cobra', view: { yaw: 70, pitch: 14 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', contacts: { hL: { type: 'palm', rot: 8, pole: [0.3, 0.1, -1] }, hR: { type: 'palm', rot: 8, pole: [-0.3, 0.1, -1] } }, props: [{ k: 'mat' }], keys: [
     { p: M(PRONE, both({ e: 30, p: 40, el: 110, g: 0 })), t: 2, h: 0.4 },
-    { p: M(PRONE, M({ sp: [-52, 0, 0], nk: [-12, 0, 0], hd: [-8, 0, 0] }, both({ e: 30, p: 40, el: 110, g: 0 }))), t: 2.2, h: 1.2 }], ref: 0 });
-  def('superman', { label: 'Superman', view: { yaw: 70, pitch: 14 }, anchor: 'ground', pin: 'hips', props: [{ k: 'mat' }], keys: [
+    { p: M(PRONE, M({ sp: [-58, 0, 0], nk: [-16, 0, 0], hd: [-8, 0, 0] }, both({ e: 30, p: 40, el: 110, g: 0 }))), t: 2.2, h: 1.2 }], ref: 0 });
+  def('superman', { supports: ['lowback', 'pelvis'], label: 'Superman', view: { yaw: 70, pitch: 14 }, anchor: 'ground', pin: 'hips', props: [{ k: 'mat' }], keys: [
     { p: M(PRONE, both({ e: 172, p: 10, el: 4, g: 0.1 })), t: 1.4, h: 0.3 },
     { p: M(PRONE, M({ sp: [-16, 0, 0], nk: [-8, 0, 0], ...legs({ f: -14, k: 2, an: -70, a: 5 }) }, both({ e: 186, p: 12, el: 4, g: 0.1 }))), t: 1.4, h: 1.2 }] });
 
   // ======================= FLOOR: on the side =======================
   // side plank from the knees: forearm under the shoulder, knees bent, lift until head-hips-knees line up (left side down)
   const SIDEBASE = M(STAND, { root: [0, 0.3, 0], ori: [0, 0, -74], sp: [0, 2, 0], hd: [0, -12, 0], aL: { e: 90, p: 90, el: 90, r: -90, g: 0.3 }, aR: { e: 8, p: 60, el: 70, g: 0.3 } });
-  def('sideplankknee', { label: 'Side plank from knees', perSide: true, hold: true, breath: true, view: { yaw: 2, pitch: 10 }, anchor: 'ground', groundSkip: 'arms', pin: 'shin.L',
-    contacts: { hL: { type: 'palm', rot: 0, under: 'upperarm.L', fwd: 0.27, pole: [0, -1, -0.3] }, hR: { to: 'hips', at: [-0.15, 0.04, 0.0], pole: [-0.3, 0.5, -1] } }, props: [{ k: 'mat', yaw: 90 }], keys: [
+  def('sideplankknee', { supports: ['kneeL', 'foreL'], label: 'Side plank from knees', perSide: true, hold: true, breath: true, view: { yaw: 2, pitch: 10 }, anchor: 'ground', groundSkip: 'arms', pin: 'shin.L',
+    contacts: { hR: { to: 'hips', at: [-0.15, 0.04, 0.0], pole: [-0.3, 0.5, -1] } }, props: [{ k: 'mat', yaw: 90 }], keys: [
       { p: M(SIDEBASE, legs({ f: 18, k: 92, a: 0, an: -20 })), t: 3 }, { p: M(SIDEBASE, M({ ori: [0, 0, -75] }, legs({ f: 18, k: 92, a: 0, an: -20 }))), t: 3 }] });
-  def('sideplank', { label: 'Side plank', perSide: true, hold: true, breath: true, view: { yaw: 2, pitch: 10 }, anchor: 'ground', groundSkip: 'arms', pin: 'foot.L',
+  def('sideplank', { supports: ['footL'], label: 'Side plank', perSide: true, hold: true, breath: true, view: { yaw: 2, pitch: 10 }, anchor: 'ground', groundSkip: 'arms', pin: 'foot.L',
     contacts: { hL: { type: 'palm', rot: 0, under: 'upperarm.L', fwd: 0.27, pole: [0, -1, -0.3] } }, props: [{ k: 'mat', yaw: 90 }], keys: [
       { p: M(SIDEBASE, M({ ori: [0, 0, -72], aR: { e: 175, p: 90, el: 4, g: 0.1 } }, { lL: { f: 0, k: 2, a: 0, an: -10 }, lR: { f: 6, k: 2, a: -4, an: -10 } })), t: 3 },
       { p: M(SIDEBASE, M({ ori: [0, 0, -73], aR: { e: 175, p: 90, el: 4, g: 0.1 } }, { lL: { f: 0, k: 2, a: 0, an: -10 }, lR: { f: 6, k: 2, a: -4, an: -10 } })), t: 3 }] });
   const SIDELY = M(STAND, { root: [0, 0.18, 0], ori: [0, 0, -90], hd: [0, -40, 0], aL: { e: 170, p: 90, el: 120, g: 0.2 }, aR: { e: 30, p: 10, el: 60, g: 0.2 } });
-  def('clamshell', { label: 'Clamshell', perSide: true, view: { yaw: 8, pitch: 22 }, anchor: 'ground', pin: 'hips', props: [{ k: 'mat', yaw: 90 }], keys: [
+  def('clamshell', { supports: ['pelvis', 'upback'], label: 'Clamshell', perSide: true, view: { yaw: 8, pitch: 22 }, anchor: 'ground', pin: 'hips', props: [{ k: 'mat', yaw: 90 }], keys: [
     { p: M(SIDELY, legs({ f: 45, k: 90, a: 0, an: 0 })), t: 1.4, h: 0.2 }, { p: M(SIDELY, { lL: { f: 45, k: 90, a: 0 }, lR: { f: 45, k: 90, a: 18, r: 58 } }), t: 1.2, h: 0.6 }] });
-  def('sidelegraise', { label: 'Side-lying leg raise', perSide: true, view: { yaw: 8, pitch: 20 }, anchor: 'ground', pin: 'hips', props: [{ k: 'mat', yaw: 90 }], keys: [
+  def('sidelegraise', { supports: ['pelvis', 'upback'], label: 'Side-lying leg raise', perSide: true, view: { yaw: 8, pitch: 20 }, anchor: 'ground', pin: 'hips', props: [{ k: 'mat', yaw: 90 }], keys: [
     { p: M(SIDELY, { lL: { f: 10, k: 30, a: 0 }, lR: { f: 0, k: 2, a: 0, an: -10 } }), t: 1.8, h: 0.2 }, { p: M(SIDELY, { lL: { f: 10, k: 30, a: 0 }, lR: { f: 0, k: 2, a: 40, an: -10 } }), t: 1.2, h: 0.6 }] });
 
   // ======================= KNEELING / SEATED STRETCHES =======================
   // half-kneeling hip flexor stretch (left knee down): tuck the tailbone, shift the hips forward
   const HK = M(STAND, { root: [0, 0.6, 0], ori: [0, -4, 0], sp: [2, 0, 0], lR: { f: 86, k: 92, a: 4, an: 6 }, lL: { f: -10, k: 90, a: 4, an: -80 }, ...both({ e: 20, p: 30, el: 60, g: 0.3 }) });
-  def('hipflexor', { label: 'Half-kneeling hip flexor stretch', perSide: true, hold: true, breath: true, view: { yaw: 80, pitch: 8 }, anchor: { bones: ['shin.L'], y: 0 }, contacts: { fR: 'flat', hL: { to: 'thigh.R', at: [0.06, -0.38, 0.03], pole: [0.6, -0.2, -1] }, hR: { to: 'thigh.R', at: [-0.06, -0.38, 0.03], pole: [-0.6, -0.2, -1] } }, props: [{ k: 'mat' }], keys: [
+  def('hipflexor', { label: 'Half-kneeling hip flexor stretch', perSide: true, hold: true, breath: true, view: { yaw: 80, pitch: 8 }, anchor: 'ground', supports: ['kneeL'], contacts: { fR: 'flat', hL: { to: 'thigh.R', at: [0.06, -0.38, 0.03], pole: [0.6, -0.2, -1] }, hR: { to: 'thigh.R', at: [-0.06, -0.38, 0.03], pole: [-0.6, -0.2, -1] } }, props: [{ k: 'mat' }], keys: [
     { p: HK, t: 2.4, h: 0.6 }, { p: M(HK, { root: [0, 0.6, 0.1], ori: [0, -10, 0], lR: { f: 70, k: 100 }, lL: { f: -26, k: 92 } }), t: 2.6, h: 2.6 }] });
   const SIT = M(STAND, { root: [0, 0.14, 0], ori: [0, -6, 0], ...legs({ f: 84, k: 4, an: -10, a: 6 }), ...both({ e: 20, p: 50, el: 10, g: 0 }) });
-  def('forwardfold', { label: 'Seated forward fold', hold: true, breath: true, view: { yaw: 75, pitch: 12 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', props: [{ k: 'mat' }],
-    contacts: { hL: { to: 'shin.L', at: [0.02, 0.36, 0.04], pole: [1, 1, 0] }, hR: { to: 'shin.R', at: [-0.02, 0.36, 0.04], pole: [-1, 1, 0] } }, keys: [
+  def('forwardfold', { supports: ['seatL', 'seatR', 'footL', 'footR'], label: 'Seated forward fold', hold: true, breath: true, view: { yaw: 75, pitch: 12 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', props: [{ k: 'mat' }],
+    contacts: { hL: { on: 'shin.L', u: 25, t: 0.6, fing: [0, -1, 0.2], pole: [1, 1, 0] }, hR: { on: 'shin.R', u: -25, t: 0.6, fing: [0, -1, 0.2], pole: [-1, 1, 0] } }, keys: [
       { p: M(SIT, { ori: [0, 26, 0], sp: [38, 0, 0], nk: [10, 0, 0], ...legs({ f: 112, k: 4, an: -2, a: 6 }) }), t: 3 }, { p: M(SIT, { ori: [0, 30, 0], sp: [42, 0, 0], nk: [12, 0, 0], ...legs({ f: 116, k: 4, an: 0, a: 6 }) }), t: 3 }] });
-  def('butterfly', { label: 'Butterfly stretch', hold: true, breath: true, view: { yaw: 22, pitch: 16 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', props: [{ k: 'mat' }],
+  def('butterfly', { supports: ['seatL', 'seatR', 'footL', 'footR'], label: 'Butterfly stretch', hold: true, breath: true, view: { yaw: 22, pitch: 16 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', props: [{ k: 'mat' }],
     contacts: { hL: { to: 'foot.L', at: [0, 0.02, 0.06], pole: [1, 0, 0] }, hR: { to: 'foot.R', at: [0, 0.02, 0.06], pole: [-1, 0, 0] } }, keys: [
-      { p: M(SIT, { ori: [0, 8, 0], sp: [10, 0, 0], ...legs({ f: 70, k: 135, a: 52, r: 30, an: 0 }) }), t: 3 }, { p: M(SIT, { ori: [0, 14, 0], sp: [14, 0, 0], ...legs({ f: 72, k: 135, a: 56, r: 30, an: 0 }) }), t: 3 }] });
-  def('russiantwist', { label: 'Russian twist', view: { yaw: 30, pitch: 14 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', alt: true, props: [{ k: 'mat' }], contacts: { hR: { to: 'hand.L', at: [-0.03, 0, 0] } }, keys: [
+      { p: M(SIT, { ori: [0, 8, 0], sp: [10, 0, 0], ...legs({ f: 135, k: 138, a: 58, r: 60, an: 0 }) }), t: 3 }, { p: M(SIT, { ori: [0, 14, 0], sp: [14, 0, 0], ...legs({ f: 135, k: 138, a: 62, r: 64, an: 0 }) }), t: 3 }] });
+  def('russiantwist', { supports: ['seatL', 'seatR'], label: 'Russian twist', view: { yaw: 30, pitch: 14 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', alt: true, props: [{ k: 'mat' }], contacts: { hR: { to: 'hand.L', at: [-0.03, 0, 0] } }, keys: [
     { p: M(SIT, { ori: [0, -38, 0], sp: [14, 0, 36], ...legs({ f: 120, k: 95, an: 0, a: 4 }), ...both({ e: 60, p: -20, el: 40, g: 0.7 }) }), t: 0.7, h: 0.15 },
     { p: M(SIT, { ori: [0, -38, 0], sp: [14, 0, -36], ...legs({ f: 120, k: 95, an: 0, a: 4 }), ...both({ e: 60, p: -20, el: 40, g: 0.7 }) }), t: 0.7, h: 0.15 }] });
 
@@ -1769,6 +2054,9 @@ float wOf(int i){ if(i==1) return vW0.y; if(i==2) return vW0.z; if(i==3) return 
     if (renderer.domElement !== canvas) return false;
     apply(frame.S); showProps(frame.S, frame.props);
     const v = frame.view;
+    // a mat without a fixed place lies under the person
+    const mp = (frame.props || []).find(p => p.k === 'mat');
+    if (mp && !mp.pos) { props.mat.position.x = v.target[0]; props.mat.position.z = v.target[2]; }
     cam.aspect = w / h; cam.fov = v.fov || 24; cam.updateProjectionMatrix();
     const yaw = v.yaw * Math.PI / 180, pit = v.pitch * Math.PI / 180;
     const t = v.target;

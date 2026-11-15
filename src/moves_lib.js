@@ -119,8 +119,17 @@
     { p: P(M({ ori: [0, 30, 0], root: [0.32, 0.8, 0] }, { lL: { f: 50, k: 60, a: 4 }, lR: { f: 10, a: -20, k: 30, an: -20 }, aL: { e: 30, p: -40, el: 20 }, aR: { e: 50, p: 50, el: 20 } })), t: 0.55, air: 0.5 },
     { p: P(M({ ori: [0, 30, 0], root: [-0.32, 0.8, 0] }, { lR: { f: 50, k: 60, a: 4 }, lL: { f: 10, a: -20, k: 30, an: -20 }, aR: { e: 30, p: -40, el: 20 }, aL: { e: 50, p: 50, el: 20 } })), t: 0.55, air: 0.5 }] });
 
+  // child's pose: from hands and knees, knees wide, sit the hips back onto the heels, chest down between the thighs,
+  // forehead on the floor, arms long in front with the palms down
+  const CHILD = P({ root: [0, 0.3, 0], ori: [0, 58, 0], sp: [40, 0, 0], nk: [12, 0, 0], hd: [8, 0, 0],
+    ...both({ e: 172, p: 14, el: 4, g: 0 }), ...legs(Object.assign(LW(58, 74, -90, -92), { a: 20, r: -14 })) });
+  def('childpose', { label: "Child's pose", view: { yaw: 66, pitch: 18 }, anchor: 'ground', hold: true, breath: true, groundSkip: 'arms', props: [{ k: 'mat' }],
+    supports: ['shinL', 'shinR', 'footL', 'footR'], reach: { region: 'head', param: ['sp', 0], max: 30 },
+    contacts: { hL: { type: 'palm', rot: 6 }, hR: { type: 'palm', rot: 6 } },
+    keys: [{ p: CHILD, t: 4, h: 0 }, { p: M(CHILD, { sp: [44, 0, 0] }), t: 4, h: 0 }] });
+
   // ======================= FLOOR: hands and knees =======================
-  const floor = (name, o) => def(name, Object.assign({ view: FLOOR, anchor: 'ground', groundSkip: 'arms', props: [{ k: 'mat' }] }, o));
+  const floor = (name, o) => def(name, Object.assign({ view: FLOOR, anchor: 'ground', groundSkip: 'arms', props: [{ k: 'mat' }], supports: ['kneeL', 'kneeR'] }, o));
   // bird-dog: opposite arm and leg long, hold 2 s, hips square
   const BD_A = M(QUAD, { aL: { e: 174, p: 4, el: 2, g: 0.1, wf: -10 }, lR: { f: -6, a: 2, k: 2, an: -40 }, cw: { hL: 0, hR: 1 } });
   const BD_B = M(QUAD, { aR: { e: 174, p: 4, el: 2, g: 0.1, wf: -10 }, lL: { f: -6, a: 2, k: 2, an: -40 }, cw: { hL: 1, hR: 0 } });
@@ -133,7 +142,7 @@
     { p: QUAD, t: 1.3, h: 0.2 }, { p: M(QUAD, { lL: { f: -2, k: 90, an: 10 } }), t: 1.1, h: 0.6 }] });
 
   // ======================= FLOOR: on the back =======================
-  const sup = (name, o) => floor(name, Object.assign({ view: { yaw: 66, pitch: 20 }, groundSkip: null, pin: 'spine02' }, o));
+  const sup = (name, o) => floor(name, Object.assign({ view: { yaw: 66, pitch: 20 }, groundSkip: null, pin: 'spine02', supports: ['upback', 'pelvis', 'head'] }, o));
   // dead bug: arms to the ceiling, knees over hips at 90 degrees; lower one arm overhead and the opposite leg long
   const DB0 = M(SUP, { sp: [4, 0, 0], hd: [6, 0, 0], ...both({ e: 92, p: 6, el: 2, g: 0.1 }), ...legs({ f: 90, k: 90, an: 0, a: 4, r: 0 }) });
   sup('deadbug', { label: 'Dead bug', alt: true, keys: [
@@ -143,13 +152,14 @@
     { p: M(DB0, { aL: { e: 172, p: 8, el: 4 }, lR: { f: 14, k: 2, an: -10 } }), t: 2.2, h: 0.4 }] });
   // glute bridge: feet flat hip-width, lift until knees, hips and shoulders line up, hold 2 s, lower slowly
   const BR0 = M(SUP, { ...legs({ f: 58, k: 112, a: 4, r: 0 }), ...both({ e: 10, p: 40, el: 4, g: 0.1, pr: -60 }) });
-  sup('bridge', { label: 'Glute bridge', contacts: FEET, keys: [
+  const BR_HANDS = { hL: { type: 'palm', rot: -90, under: 'thigh.#', fwd: -0.05, out: 0.14 }, hR: { type: 'palm', rot: -90, under: 'thigh.#', fwd: -0.05, out: 0.14 } };
+  sup('bridge', { label: 'Glute bridge', contacts: Object.assign({}, FEET, BR_HANDS), keys: [
     { p: BR0, t: 3, h: 0.4 },
     { p: M(BR0, { root: [0, 0.4, 0.2], ori: [0, -122, 0], sp: [-2, 0, 0], hd: [24, 0, 0], ...both({ e: -28, p: 34 }) }), t: 1.4, h: 2 }], anchorY: 'shoulders' });
-  sup('singlelegbridge', { label: 'Single-leg bridge', perSide: true, contacts: { fR: 'flat' }, keys: [
+  sup('singlelegbridge', { label: 'Single-leg bridge', perSide: true, contacts: Object.assign({ fR: 'flat' }, BR_HANDS), keys: [
     { p: M(BR0, { lL: { f: 90, k: 20, an: 0 } }), t: 2.5, h: 0.3 },
     { p: M(BR0, { root: [0, 0.4, 0.2], ori: [0, -120, 0], hd: [24, 0, 0], lL: { f: 30, k: 4, an: -10 }, ...both({ e: -28, p: 34 }) }), t: 1.3, h: 1 }] });
-  const BELLY = { hL: { to: 'spine03', at: [0.07, 0.02, 0.13], palm: [0, 0, 1] }, hR: { to: 'spine01', at: [-0.06, 0.06, 0.14], palm: [0, 0, 1] } };
+  const BELLY = { hL: { on: 'spine04', u: 8, t: 0.6, fing: [-1, 0.25, 0] }, hR: { on: 'spine01', u: -12, t: 0.2, fing: [1, 0.3, 0] } };
   // breathing: in for 4 s (belly rises), out for 6 s
   sup('breathe', { label: 'Belly breathing', hold: true, breath: true, contacts: Object.assign({}, FEET, BELLY), keys: [
     { p: M(SUP, { sp: [-4, 0, 0], ori: [0, -92, 0] }), t: 4, ease: 'sine' }, { p: M(SUP, { sp: [1, 0, 0] }), t: 6, ease: 'sine' }] });
@@ -176,7 +186,7 @@
     { p: M(SUPFLAT, M({ sp: [17, 0, 0], hd: [16, 0, 0], ...legs({ f: 29, k: 2, an: -20, a: 2 }) }, both({ e: 170, p: 6, el: 4 }))), t: 3 }] });
   // knees to chest: hug both shins, hold, then rock gently side to side
   const KTC = M(SUP, { hd: [10, 0, 0], sp: [6, 0, 0], ...legs({ f: 122, k: 128, a: 8, an: -10 }) });
-  const HUG = { hL: { to: 'shin.L', at: [0.02, -0.09, 0.06], pole: [1, 0.3, 0] }, hR: { to: 'shin.R', at: [-0.02, -0.09, 0.06], pole: [-1, 0.3, 0] } };
+  const HUG = { hL: { on: 'shin.L', u: 20, t: 0.2, fing: [-1, 0, 0] }, hR: { on: 'shin.R', u: -20, t: 0.2, fing: [1, 0, 0] } };
   sup('kneestochest', { label: 'Knees to chest', hold: true, breath: true, contacts: HUG, keys: [
     { p: KTC, t: 2, h: 3 }, { p: M(KTC, { ori: [0, -90, 0, 18], sp: [6, 0, -12] }), t: 1.4 }, { p: KTC, t: 1.2 },
     { p: M(KTC, { ori: [0, -90, 0, -18], sp: [6, 0, 12] }), t: 1.4 }, { p: KTC, t: 1.2 }] });
@@ -202,9 +212,9 @@
   const puTop = M(PLANK, { root: [0, 0.62, 0], ori: [0, 74.5, 0], ...both({ e: 75, p: 14, el: 0, g: 0 }), ...legs({ f: 0, k: 0, an: -18, toe: 50, a: 3 }) });
   const puBot = M(PLANK, { root: [0, 0.25, 0.3], ori: [0, 87.5, 0], ...both({ e: 30, p: 30, el: 100, g: 0 }), ...legs({ f: 0, k: 0, an: -4, toe: 60, a: 3 }) });
   def('pushup', { label: 'Push-up', view: { yaw: 66, pitch: 14 }, anchor: 'feet', balance: false, contacts: PU, props: [{ k: 'mat' }], keys: [{ p: puTop, t: 1.2, h: 0.4 }, { p: puBot, t: 2.6, h: 0.15 }] });
-  const kpTop = M(puTop, { root: [0, 0.6, -0.1], ori: [0, 64, 0], ...legs({ f: 0, k: 95, an: -30, toe: 0 }) });
-  const kpBot = M(puBot, { root: [0, 0.24, 0.22], ori: [0, 80, 0], ...legs({ f: 0, k: 85, an: -30, toe: 0 }) });
-  def('kneepushup', { label: 'Knee push-up', view: { yaw: 66, pitch: 14 }, anchor: 'ground', groundSkip: 'arms', pin: ['shin.L', 'shin.R'], contacts: { hL: PU.hL, hR: PU.hR }, props: [{ k: 'mat' }], keys: [{ p: kpTop, t: 1.2, h: 0.4 }, { p: kpBot, t: 2.4, h: 0.15 }] });
+  const kpTop = M(puTop, { root: [0, 0.6, -0.1], ori: [0, 64, 0], ...legs({ f: 0, k: 70, an: -30, toe: 0 }) });
+  const kpBot = M(puBot, { root: [0, 0.24, 0.22], ori: [0, 80, 0], ...legs({ f: 0, k: 70, an: -30, toe: 0 }) });
+  def('kneepushup', { supports: ['kneeL', 'kneeR'], label: 'Knee push-up', view: { yaw: 66, pitch: 14 }, anchor: 'ground', groundSkip: 'arms', pin: ['shin.L', 'shin.R'], contacts: { hL: PU.hL, hR: PU.hR }, props: [{ k: 'mat' }], keys: [{ p: kpTop, t: 1.2, h: 0.4 }, { p: kpBot, t: 2.4, h: 0.15 }] });
   def('inclinepushup', { label: 'Incline push-up', view: { yaw: 66, pitch: 12 }, anchor: 'none', props: [{ k: 'bench', pos: [0, 0, 0.55], yaw: 90 }], contacts: { hL: Object.assign({}, PU.hL, { y: 0.455, pos: [0.21, 0, 0.5] }), hR: Object.assign({}, PU.hR, { y: 0.455, pos: [-0.21, 0, 0.5] }), fL: 'ball', fR: 'ball' }, keys: [
     { p: M(PLANK, { root: [0, 0.82, -0.35], ori: [0, 52, 0], ...both({ e: 56, p: 14, el: 0 }), ...legs({ f: 0, k: 0, an: -30, toe: 45, a: 3 }) }), t: 1.2, h: 0.4 },
     { p: M(PLANK, { root: [0, 0.6, -0.12], ori: [0, 64, 0], ...both({ e: 20, p: 30, el: 100 }), ...legs({ f: 0, k: 0, an: -20, toe: 50, a: 3 }) }), t: 2.4, h: 0.2 }] });
@@ -228,42 +238,42 @@
     { p: P(M(legs({ an: -30, k: 2 }), M(both({ e: 165, p: 20, el: 6 }), { cw: { hL: 0, hR: 0 } }))), t: 0.6, air: 0.7 }] });
   // cobra: hips stay down, press the chest up with the back muscles first
   const PRONE = M(STAND, { root: [0, 0.12, 0], ori: [0, 90, 0], nk: [-6, 0, 0], hd: [-6, 0, 0], ...legs({ f: 0, k: 2, an: -80, a: 4 }) });
-  def('cobra', { label: 'Cobra', view: { yaw: 70, pitch: 14 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', contacts: { hL: { type: 'palm', rot: 8, pole: [0.3, 0.1, -1] }, hR: { type: 'palm', rot: 8, pole: [-0.3, 0.1, -1] } }, props: [{ k: 'mat' }], keys: [
+  def('cobra', { supports: ['pelvis', 'kneeL', 'kneeR'], label: 'Cobra', view: { yaw: 70, pitch: 14 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', contacts: { hL: { type: 'palm', rot: 8, pole: [0.3, 0.1, -1] }, hR: { type: 'palm', rot: 8, pole: [-0.3, 0.1, -1] } }, props: [{ k: 'mat' }], keys: [
     { p: M(PRONE, both({ e: 30, p: 40, el: 110, g: 0 })), t: 2, h: 0.4 },
-    { p: M(PRONE, M({ sp: [-52, 0, 0], nk: [-12, 0, 0], hd: [-8, 0, 0] }, both({ e: 30, p: 40, el: 110, g: 0 }))), t: 2.2, h: 1.2 }], ref: 0 });
-  def('superman', { label: 'Superman', view: { yaw: 70, pitch: 14 }, anchor: 'ground', pin: 'hips', props: [{ k: 'mat' }], keys: [
+    { p: M(PRONE, M({ sp: [-58, 0, 0], nk: [-16, 0, 0], hd: [-8, 0, 0] }, both({ e: 30, p: 40, el: 110, g: 0 }))), t: 2.2, h: 1.2 }], ref: 0 });
+  def('superman', { supports: ['lowback', 'pelvis'], label: 'Superman', view: { yaw: 70, pitch: 14 }, anchor: 'ground', pin: 'hips', props: [{ k: 'mat' }], keys: [
     { p: M(PRONE, both({ e: 172, p: 10, el: 4, g: 0.1 })), t: 1.4, h: 0.3 },
     { p: M(PRONE, M({ sp: [-16, 0, 0], nk: [-8, 0, 0], ...legs({ f: -14, k: 2, an: -70, a: 5 }) }, both({ e: 186, p: 12, el: 4, g: 0.1 }))), t: 1.4, h: 1.2 }] });
 
   // ======================= FLOOR: on the side =======================
   // side plank from the knees: forearm under the shoulder, knees bent, lift until head-hips-knees line up (left side down)
   const SIDEBASE = M(STAND, { root: [0, 0.3, 0], ori: [0, 0, -74], sp: [0, 2, 0], hd: [0, -12, 0], aL: { e: 90, p: 90, el: 90, r: -90, g: 0.3 }, aR: { e: 8, p: 60, el: 70, g: 0.3 } });
-  def('sideplankknee', { label: 'Side plank from knees', perSide: true, hold: true, breath: true, view: { yaw: 2, pitch: 10 }, anchor: 'ground', groundSkip: 'arms', pin: 'shin.L',
-    contacts: { hL: { type: 'palm', rot: 0, under: 'upperarm.L', fwd: 0.27, pole: [0, -1, -0.3] }, hR: { to: 'hips', at: [-0.15, 0.04, 0.0], pole: [-0.3, 0.5, -1] } }, props: [{ k: 'mat', yaw: 90 }], keys: [
+  def('sideplankknee', { supports: ['kneeL', 'foreL'], label: 'Side plank from knees', perSide: true, hold: true, breath: true, view: { yaw: 2, pitch: 10 }, anchor: 'ground', groundSkip: 'arms', pin: 'shin.L',
+    contacts: { hR: { to: 'hips', at: [-0.15, 0.04, 0.0], pole: [-0.3, 0.5, -1] } }, props: [{ k: 'mat', yaw: 90 }], keys: [
       { p: M(SIDEBASE, legs({ f: 18, k: 92, a: 0, an: -20 })), t: 3 }, { p: M(SIDEBASE, M({ ori: [0, 0, -75] }, legs({ f: 18, k: 92, a: 0, an: -20 }))), t: 3 }] });
-  def('sideplank', { label: 'Side plank', perSide: true, hold: true, breath: true, view: { yaw: 2, pitch: 10 }, anchor: 'ground', groundSkip: 'arms', pin: 'foot.L',
+  def('sideplank', { supports: ['footL'], label: 'Side plank', perSide: true, hold: true, breath: true, view: { yaw: 2, pitch: 10 }, anchor: 'ground', groundSkip: 'arms', pin: 'foot.L',
     contacts: { hL: { type: 'palm', rot: 0, under: 'upperarm.L', fwd: 0.27, pole: [0, -1, -0.3] } }, props: [{ k: 'mat', yaw: 90 }], keys: [
       { p: M(SIDEBASE, M({ ori: [0, 0, -72], aR: { e: 175, p: 90, el: 4, g: 0.1 } }, { lL: { f: 0, k: 2, a: 0, an: -10 }, lR: { f: 6, k: 2, a: -4, an: -10 } })), t: 3 },
       { p: M(SIDEBASE, M({ ori: [0, 0, -73], aR: { e: 175, p: 90, el: 4, g: 0.1 } }, { lL: { f: 0, k: 2, a: 0, an: -10 }, lR: { f: 6, k: 2, a: -4, an: -10 } })), t: 3 }] });
   const SIDELY = M(STAND, { root: [0, 0.18, 0], ori: [0, 0, -90], hd: [0, -40, 0], aL: { e: 170, p: 90, el: 120, g: 0.2 }, aR: { e: 30, p: 10, el: 60, g: 0.2 } });
-  def('clamshell', { label: 'Clamshell', perSide: true, view: { yaw: 8, pitch: 22 }, anchor: 'ground', pin: 'hips', props: [{ k: 'mat', yaw: 90 }], keys: [
+  def('clamshell', { supports: ['pelvis', 'upback'], label: 'Clamshell', perSide: true, view: { yaw: 8, pitch: 22 }, anchor: 'ground', pin: 'hips', props: [{ k: 'mat', yaw: 90 }], keys: [
     { p: M(SIDELY, legs({ f: 45, k: 90, a: 0, an: 0 })), t: 1.4, h: 0.2 }, { p: M(SIDELY, { lL: { f: 45, k: 90, a: 0 }, lR: { f: 45, k: 90, a: 18, r: 58 } }), t: 1.2, h: 0.6 }] });
-  def('sidelegraise', { label: 'Side-lying leg raise', perSide: true, view: { yaw: 8, pitch: 20 }, anchor: 'ground', pin: 'hips', props: [{ k: 'mat', yaw: 90 }], keys: [
+  def('sidelegraise', { supports: ['pelvis', 'upback'], label: 'Side-lying leg raise', perSide: true, view: { yaw: 8, pitch: 20 }, anchor: 'ground', pin: 'hips', props: [{ k: 'mat', yaw: 90 }], keys: [
     { p: M(SIDELY, { lL: { f: 10, k: 30, a: 0 }, lR: { f: 0, k: 2, a: 0, an: -10 } }), t: 1.8, h: 0.2 }, { p: M(SIDELY, { lL: { f: 10, k: 30, a: 0 }, lR: { f: 0, k: 2, a: 40, an: -10 } }), t: 1.2, h: 0.6 }] });
 
   // ======================= KNEELING / SEATED STRETCHES =======================
   // half-kneeling hip flexor stretch (left knee down): tuck the tailbone, shift the hips forward
   const HK = M(STAND, { root: [0, 0.6, 0], ori: [0, -4, 0], sp: [2, 0, 0], lR: { f: 86, k: 92, a: 4, an: 6 }, lL: { f: -10, k: 90, a: 4, an: -80 }, ...both({ e: 20, p: 30, el: 60, g: 0.3 }) });
-  def('hipflexor', { label: 'Half-kneeling hip flexor stretch', perSide: true, hold: true, breath: true, view: { yaw: 80, pitch: 8 }, anchor: { bones: ['shin.L'], y: 0 }, contacts: { fR: 'flat', hL: { to: 'thigh.R', at: [0.06, -0.38, 0.03], pole: [0.6, -0.2, -1] }, hR: { to: 'thigh.R', at: [-0.06, -0.38, 0.03], pole: [-0.6, -0.2, -1] } }, props: [{ k: 'mat' }], keys: [
+  def('hipflexor', { label: 'Half-kneeling hip flexor stretch', perSide: true, hold: true, breath: true, view: { yaw: 80, pitch: 8 }, anchor: 'ground', supports: ['kneeL'], contacts: { fR: 'flat', hL: { to: 'thigh.R', at: [0.06, -0.38, 0.03], pole: [0.6, -0.2, -1] }, hR: { to: 'thigh.R', at: [-0.06, -0.38, 0.03], pole: [-0.6, -0.2, -1] } }, props: [{ k: 'mat' }], keys: [
     { p: HK, t: 2.4, h: 0.6 }, { p: M(HK, { root: [0, 0.6, 0.1], ori: [0, -10, 0], lR: { f: 70, k: 100 }, lL: { f: -26, k: 92 } }), t: 2.6, h: 2.6 }] });
   const SIT = M(STAND, { root: [0, 0.14, 0], ori: [0, -6, 0], ...legs({ f: 84, k: 4, an: -10, a: 6 }), ...both({ e: 20, p: 50, el: 10, g: 0 }) });
-  def('forwardfold', { label: 'Seated forward fold', hold: true, breath: true, view: { yaw: 75, pitch: 12 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', props: [{ k: 'mat' }],
-    contacts: { hL: { to: 'shin.L', at: [0.02, 0.36, 0.04], pole: [1, 1, 0] }, hR: { to: 'shin.R', at: [-0.02, 0.36, 0.04], pole: [-1, 1, 0] } }, keys: [
+  def('forwardfold', { supports: ['seatL', 'seatR', 'footL', 'footR'], label: 'Seated forward fold', hold: true, breath: true, view: { yaw: 75, pitch: 12 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', props: [{ k: 'mat' }],
+    contacts: { hL: { on: 'shin.L', u: 25, t: 0.6, fing: [0, -1, 0.2], pole: [1, 1, 0] }, hR: { on: 'shin.R', u: -25, t: 0.6, fing: [0, -1, 0.2], pole: [-1, 1, 0] } }, keys: [
       { p: M(SIT, { ori: [0, 26, 0], sp: [38, 0, 0], nk: [10, 0, 0], ...legs({ f: 112, k: 4, an: -2, a: 6 }) }), t: 3 }, { p: M(SIT, { ori: [0, 30, 0], sp: [42, 0, 0], nk: [12, 0, 0], ...legs({ f: 116, k: 4, an: 0, a: 6 }) }), t: 3 }] });
-  def('butterfly', { label: 'Butterfly stretch', hold: true, breath: true, view: { yaw: 22, pitch: 16 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', props: [{ k: 'mat' }],
+  def('butterfly', { supports: ['seatL', 'seatR', 'footL', 'footR'], label: 'Butterfly stretch', hold: true, breath: true, view: { yaw: 22, pitch: 16 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', props: [{ k: 'mat' }],
     contacts: { hL: { to: 'foot.L', at: [0, 0.02, 0.06], pole: [1, 0, 0] }, hR: { to: 'foot.R', at: [0, 0.02, 0.06], pole: [-1, 0, 0] } }, keys: [
-      { p: M(SIT, { ori: [0, 8, 0], sp: [10, 0, 0], ...legs({ f: 70, k: 135, a: 52, r: 30, an: 0 }) }), t: 3 }, { p: M(SIT, { ori: [0, 14, 0], sp: [14, 0, 0], ...legs({ f: 72, k: 135, a: 56, r: 30, an: 0 }) }), t: 3 }] });
-  def('russiantwist', { label: 'Russian twist', view: { yaw: 30, pitch: 14 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', alt: true, props: [{ k: 'mat' }], contacts: { hR: { to: 'hand.L', at: [-0.03, 0, 0] } }, keys: [
+      { p: M(SIT, { ori: [0, 8, 0], sp: [10, 0, 0], ...legs({ f: 135, k: 138, a: 58, r: 60, an: 0 }) }), t: 3 }, { p: M(SIT, { ori: [0, 14, 0], sp: [14, 0, 0], ...legs({ f: 135, k: 138, a: 62, r: 64, an: 0 }) }), t: 3 }] });
+  def('russiantwist', { supports: ['seatL', 'seatR'], label: 'Russian twist', view: { yaw: 30, pitch: 14 }, anchor: 'ground', groundSkip: 'arms', pin: 'hips', alt: true, props: [{ k: 'mat' }], contacts: { hR: { to: 'hand.L', at: [-0.03, 0, 0] } }, keys: [
     { p: M(SIT, { ori: [0, -38, 0], sp: [14, 0, 36], ...legs({ f: 120, k: 95, an: 0, a: 4 }), ...both({ e: 60, p: -20, el: 40, g: 0.7 }) }), t: 0.7, h: 0.15 },
     { p: M(SIT, { ori: [0, -38, 0], sp: [14, 0, -36], ...legs({ f: 120, k: 95, an: 0, a: 4 }), ...both({ e: 60, p: -20, el: 40, g: 0.7 }) }), t: 0.7, h: 0.15 }] });
 

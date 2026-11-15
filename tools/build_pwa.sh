@@ -1,9 +1,7 @@
 set -e
-# Builds the installable app into the repository root (index.html, sw.js, manifest, icons).
-# Run from the repository root:  bash tools/build_pwa.sh
-# vendor/ holds pdf.js 2.x, three.js r128 and mammoth (copied from npm: pdfjs-dist, three, mammoth).
-D=${OUT:-.}
-mkdir -p $D/vendor $D/icons
+D=/tmp/claude-0/-home-user/1a225017-3aeb-5401-8363-1982d1300b6d/scratchpad/pwa
+rm -rf $D && mkdir -p $D/vendor $D/icons
+cp node_modules/pdfjs-dist/build/pdf.min.js node_modules/pdfjs-dist/build/pdf.worker.min.js node_modules/three/build/three.min.js node_modules/mammoth/mammoth.browser.min.js $D/vendor/
 VER=$(date +%s)
 {
 cat <<'H'

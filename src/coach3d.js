@@ -242,6 +242,9 @@ float wOf(int i){ if(i==1) return vW0.y; if(i==2) return vW0.z; if(i==3) return 
     if (renderer.domElement !== canvas) return false;
     apply(frame.S); showProps(frame.S, frame.props);
     const v = frame.view;
+    // a mat without a fixed place lies under the person
+    const mp = (frame.props || []).find(p => p.k === 'mat');
+    if (mp && !mp.pos) { props.mat.position.x = v.target[0]; props.mat.position.z = v.target[2]; }
     cam.aspect = w / h; cam.fov = v.fov || 24; cam.updateProjectionMatrix();
     const yaw = v.yaw * Math.PI / 180, pit = v.pitch * Math.PI / 180;
     const t = v.target;
